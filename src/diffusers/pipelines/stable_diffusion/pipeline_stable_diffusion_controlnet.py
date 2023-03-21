@@ -606,6 +606,7 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline):
     def prepare_image(
         self, image, width, height, batch_size, num_images_per_prompt, device, dtype, do_classifier_free_guidance
     ):
+
         if not isinstance(image, torch.Tensor):
             if isinstance(image, PIL.Image.Image):
                 image = [image]
@@ -724,6 +725,8 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline):
         callback_steps: int = 1,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         controlnet_conditioning_scale: Union[float, List[float]] = 1.0,
+        mask: Union[torch.FloatTensor, PIL.Image.Image, List[torch.FloatTensor], List[PIL.Image.Image]] = None,
+        mask_ref: Union[torch.FloatTensor, PIL.Image.Image, List[torch.FloatTensor], List[PIL.Image.Image]] = None 
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -882,6 +885,24 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline):
         else:
             assert False
 
+        if mask:
+            mask = mask.resize((width // 8, height // 8), resample=PIL_INTERPOLATION["lanczos"])
+            mask = np.array(mask)/255.
+            mask = np.expand_dims(mask, axis=-1)
+            mask = torch.from_numpy(mask).permute(2, 0, 1).unsqueeze(0)
+            mask = mask.to(image.device, dtype=self.controlnet.dtype)
+
+            mask_ref = self.prepare_image(
+                image=mask_ref,
+                width=width,
+                height=height,
+                batch_size=batch_size,
+                num_images_per_prompt=1,
+                device=device,
+                dtype=self.controlnet.dtype,
+                do_classifier_free_guidance=False
+            )
+            latent_mask_ref = self.vae.encode(mask_ref).latent_dist.sample()
         # 5. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
@@ -935,9 +956,13 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline):
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
+                if mask is not None:
+                    latents = latent_mask_ref * mask + (1 - mask) * latents
+                    latents = latent_mask_ref 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
+                
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
