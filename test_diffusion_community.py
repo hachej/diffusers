@@ -18,22 +18,26 @@ from annotator import MLSDdetector, UniformerDetector
 
 from PIL import Image, ImageOps
 
-# download an image
-image_ref = load_image(
-    "https://can01.anibis.ch/Genf-Maison-Prestige/?1024x768/3/60/anibis/071/478/047/zv2wrFS8JkCernwEpWoMeg_1.jpg"
-)
 
-image = np.array(image_ref)
-
-# get hough image
-model = MLSDdetector.from_pretrained("lllyasviel/ControlNet")
-hough_image = model(image)
-H, W, C = np.array(hough_image).shape
-
-# get segmentation
 keep_labels = ['windowpane','sky', 'fireplace', 'stairs']
 keep_from_line_labels = ['ceiling','wall','floor','door']
+value_threshold = 0.61
+distance_threshold = 6
 
+# download an image
+image_ref = load_image(
+    #"https://media2.homegate.ch/f_auto/t_web_dp_fullscreen/listings/x379/3002675848/image/bfa446e81f1ab2c653df85902131f113.jpg"
+    "https://media2.homegate.ch/f_auto/t_web_dp_fullscreen/listings/x379/3002675848/image/8e85d1109cc7644fc2ae3d823d9c100b.jpg"
+)
+image_ref.save("out_image_original.png")
+max_width = 1024
+scale = 1024 / image_ref.size[0]
+image_ref = image_ref.resize((1024,int(image_ref.size[1]* scale)),Image.Resampling.NEAREST)
+
+image = np.array(image_ref)
+H, W, C = np.array(image).shape
+
+# get segmentation
 uniformer = UniformerDetector.from_pretrained("lllyasviel/ControlNet")
 detected_map_seg, label_image = uniformer(image)
 
@@ -42,18 +46,22 @@ label_image = label_image[0]
 keep_idxs = [classes.index(label) for label in keep_labels]
 keep_from_line_idxs = [classes.index(label) for label in keep_from_line_labels]
 
-line_mask = np.sum(np.array([label_image == idx for idx in keep_from_line_idxs]),axis=0)
 mask_np = np.sum(np.array([label_image == idx for idx in keep_idxs]),axis=0)*255
+mask_np = cv2.dilate(mask_np.astype('uint8'), np.ones((5, 5), np.uint8), iterations=1)
 mask = Image.fromarray(mask_np.astype('uint8'))
 mask = ImageOps.invert(mask.convert("RGB"))
+mask = mask.resize((W,H),Image.Resampling.NEAREST)
 
-# mask_latent_np = cv2.resize(mask_np, (W // 8, H // 8), interpolation=cv2.INTER_NEAREST)
-# mask_latent_np = np.expand_dims(mask_latent_np, axis=-1)
-# mask_latent = array2tensor(mask_latent_np).cuda().repeat(num_samples, 1, 1, 1)
-# ref = array2tensor(img_resized).float().cuda().repeat(num_samples, 1, 1, 1) / 255.
-mask_image_exemple = load_image(
-    "https://github.com/CompVis/latent-diffusion/raw/main/data/inpainting_examples/overture-creations-5sI6fQgYIuo_mask.png"
-)
+mask.save("out_mask.png")
+
+# get hough image
+model = MLSDdetector.from_pretrained("lllyasviel/ControlNet")
+hough_image = model(image, value_threshold, distance_threshold)
+line_mask = np.sum(np.array([label_image == idx for idx in keep_from_line_idxs]),axis=0)
+hough_image = hough_image * np.expand_dims(line_mask,axis=-1).astype('uint8')
+hough_image = Image.fromarray(hough_image.astype('uint8'))
+hough_image = hough_image.resize((W,H),Image.Resampling.NEAREST)
+hough_image.save("out_controlnet.png")
 
 # load control net and stable diffusion v1-5
 controlnet = ControlNetModel.from_pretrained("lllyasviel/sd-controlnet-mlsd", torch_dtype=torch.float16)
@@ -61,13 +69,11 @@ controlnet = ControlNetModel.from_pretrained("lllyasviel/sd-controlnet-mlsd", to
 from examples.community.stable_diffusion_controlnet_inpaint_img2img import StableDiffusionControlNetInpaintImg2ImgPipeline
 
 pipe = StableDiffusionControlNetInpaintImg2ImgPipeline.from_pretrained(
-                "runwayml/stable-diffusion-v1-5", 
-                controlnet=controlnet, 
-                safety_checker=None, 
-                torch_dtype=torch.float16
-            )
+    #"runwayml/stable-diffusion-v1-5", -> generate error...
+    "runwayml/stable-diffusion-inpainting", 
+    controlnet=controlnet, safety_checker=None, torch_dtype=torch.float16)
 
-# speed up diffusion process with faster scheduler and memory optimization
+
 pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
 
 # remove following line if xformers is not installed
@@ -79,11 +85,11 @@ pipe.enable_model_cpu_offload()
 generator = torch.manual_seed(0)
 
 image = pipe(
-    "nice living room, high resolution",
+    "nice living room, high resolution, furnitures, couch",
     image_ref,
     mask,
     hough_image,
-    num_inference_steps=20,
+    num_inference_steps=40,
 ).images[0]
 
 image.save("output_image.png")
